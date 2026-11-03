@@ -1,5 +1,7 @@
 # OPENBSD-pf.conf-and-sysctl.conf
 
+You can build a OPENBSD Router with raspberry pi 4
+
 sample /etc/pf.conf and /etc/sysctl.conf for openbsd
 
 go to this link:-
