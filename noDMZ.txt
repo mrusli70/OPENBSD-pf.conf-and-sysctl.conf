@@ -1,0 +1,128 @@
+###############################################################################
+# OpenBSD 7.7 - Hardened pf.conf (LAN only)
+# Policy: default deny; if-bound states; QUIC/DoT/DoQ blocked; DNS forced to 1.1.1.1/1.0.0.1
+###############################################################################
+
+##### 1) Macros & Tables
+wan_if = "igc0"
+lan_if = "igc1"
+lan_net = "192.168.2.0/24"
+
+table <dns_upstream> const { 1.1.1.1, 1.0.0.1 }
+table <doh_watch>   persist { 1.1.1.1, 1.0.0.1, 9.9.9.9, 149.112.112.112 }
+table <lan_protected> const { $lan_net }
+table <abusers>       persist
+table <scanners>      persist
+table <abusive_hosts> persist
+table <bogons> const { \
+  0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, \
+  169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, \
+  192.88.99.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, \
+  203.0.113.0/24, 224.0.0.0/3, 240.0.0.0/4 }
+
+##### 2) Global Options
+set block-policy drop
+set optimization aggressive
+set state-policy if-bound
+set loginterface $wan_if
+set skip on { lo0 }
+set ruleset-optimization basic
+set limit   { states 200000, frags 4096, src-nodes 80000 }
+set timeout { adaptive.start 100000, adaptive.end 150000, src.track 30 }
+set syncookies adaptive (start 60%, end 30%)
+
+block drop inet6 all
+
+# WAN ICMP (health, rate-limited)
+pass in quick on $wan_if inet proto icmp to ($wan_if) icmp-type echoreq \
+    keep state (max-src-conn-rate 5/60, overload <scanners> flush global) \
+    label "wan-icmp-echo"
+pass in quick on $wan_if inet proto icmp to ($wan_if) icmp-type unreach \
+    keep state label "wan-icmp-unreach"
+
+##### 3) Scrub
+match in  on $wan_if scrub (no-df random-id min-ttl 10 max-mss 1440 reassemble tcp)
+match out on $wan_if scrub (random-id max-mss 1440)
+
+##### 4) NAT (UDP static-port for RTC; others high-ephemeral)
+match out on $wan_if proto udp from $lan_net nat-to ($wan_if) static-port
+match out on $wan_if from $lan_net nat-to ($wan_if) port 49152:65535
+
+##### 5) Hygiene & Anti-Spoof
+antispoof quick for { $wan_if $lan_if }
+block in  quick on $wan_if from urpf-failed
+block in  quick on $wan_if from <bogons>
+block out quick on $wan_if to   <bogons> label "egress-bogons"
+
+# Null ports & TCP flag sanity
+block in  quick on $wan_if proto { tcp udp } from any to any port 0 label "null-dst-in"
+block in  quick on $wan_if proto { tcp udp } from any port 0 to any label "null-src-in"
+block out quick on $wan_if proto { tcp udp } from any to any port 0 label "null-dst-out"
+block out quick on $wan_if proto { tcp udp } from any port 0 to any label "null-src-out"
+
+block in quick on $wan_if proto tcp flags SF/SF             label "tcp-synfin"
+block in quick on $wan_if proto tcp flags FPU/FPU           label "tcp-finpshurg"
+block in quick on $wan_if proto tcp flags /SF               label "tcp-no-syn"
+block in quick on $wan_if proto tcp flags SFRPAU/SFRPAU     label "tcp-all"
+block in quick on $wan_if proto tcp flags /SFRPAU           label "tcp-null"
+block in quick on $wan_if proto tcp flags FUP/FUP           label "tcp-stealth"
+block in quick on $wan_if proto tcp flags SR/SR             label "tcp-synrst"
+
+# Dynamic blocklists
+block in quick from <abusers>       label "abusers"
+block in quick from <scanners>      label "scanners"
+block in quick from <abusive_hosts> label "abusive"
+
+##### 6) Default Deny
+block all
+
+##### 7) WAN Inbound (client DHCP if needed)
+pass in quick on $wan_if proto udp from any port 67 to ($wan_if) port 68 \
+    keep state label "wan-dhcp"
+block in quick on $wan_if all label "wan-in-block-rest"
+
+##### 8) QUIC/DoT/DoQ control
+block     quick on $wan_if proto udp to any port { 80 443 }         label "quic-block"
+block in  log   quick on $wan_if proto udp to any port 784          label "doq-in"
+block in  log   quick on $wan_if proto tcp to any port 853          label "dot-in"
+block out log   quick on $wan_if proto udp from $lan_net to any port 784           label "doq-out"
+block out log   quick on $wan_if proto tcp from $lan_net to any port 853           label "dot-out"
+
+##### 9) Admin to firewall (SSH from LAN)
+pass in log quick on $lan_if proto tcp from $lan_net to ($lan_if) port 22 \
+    flags S/SA keep state (max-src-conn-rate 3/300, overload <scanners> flush global) \
+    label "ssh-fw"
+
+##### 10) DHCP server on LAN (if this host serves DHCP)
+pass in  quick on $lan_if proto udp from $lan_net port 68 to 255.255.255.255 port 67 keep state label "lan-dhcp-client-bc"
+pass in  quick on $lan_if proto udp from $lan_net port 68 to ($lan_if)           port 67 keep state label "lan-dhcp-client-uc"
+pass out quick on $lan_if proto udp from ($lan_if) port 67 to $lan_net           port 68 keep state label "lan-dhcp-server-uc"
+pass out quick on $lan_if proto udp from ($lan_if) port 67 to 255.255.255.255    port 68 keep state label "lan-dhcp-server-bc"
+
+##### 11) DNS enforcement (no local resolver; force :53 to <dns_upstream>)
+# Visible DoH attempts (TLS to known resolvers)
+pass in  log quick on $lan_if proto tcp from $lan_net to <doh_watch> port 443 \
+    flags S/SA modulate state label "doh-watch-lan"
+
+# Allow DNS only to upstream resolvers; block everything else on :53
+pass in  quick on $lan_if proto { udp tcp } from $lan_net to <dns_upstream> port 53 keep state label "lan-dns"
+block in log quick on $lan_if proto { udp tcp } from $lan_net to any           port 53 label "lan-dns-block"
+
+##### 12) LAN â†’ Internet (kept broad; hardened by blocks below)
+pass in quick on $lan_if from $lan_net to any flags S/SA modulate state \
+    (max-src-conn-rate 400/10, overload <scanners> flush global) \
+    label "lan-out"
+
+##### 13) Egress risk reduction on WAN
+block out quick on $wan_if proto tcp from $lan_net to any port 25                            label "block-smtp-out"
+block out quick on $wan_if proto { tcp udp } from $lan_net to any port { 137 138 139 445 111 69 161 162 } label "lan-legacy-out"
+block out quick on $wan_if proto tcp from $lan_net to any port { 3389 5900:5999 5985 5986 } label "block-rdp-vnc-winrm"
+block out quick on $wan_if proto udp from $lan_net to any port 1900                          label "block-ssdp"
+
+##### 14) Firewall itself â†’ Internet
+pass out quick on $wan_if proto { tcp udp icmp } from (self) to any \
+    flags S/SA modulate state (max-src-states 2000, max-src-nodes 1000, max-src-conn-rate 200/10, overload <abusers> flush global) \
+    label "fw-out"
+
+##### 15) Anti-rebind (LAN)
+block return in quick on $lan_if from $lan_net to <lan_protected> flags S/SA label "anti-rebind-lan"
