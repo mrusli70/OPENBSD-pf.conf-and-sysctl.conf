@@ -14,6 +14,8 @@ https://www.openbsdhandbook.com/router-firewall/
 
 https://blakerain.com/blog/raspberrypi-openbsd-firewall/
 
+https://btxx.org/posts/openbsd-router/
+
 https://www.protectstar.com/en/blog/openbsd-77-as-a-robust-firewall-foundation-a-pfconf-and-sysctlconf-that-have-your-back
 
 https://www.protectstar.com/download/blog/pf.conf_noDMZ.txt
