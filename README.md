@@ -1,3 +1,15 @@
 # OPENBSD-pf.conf-and-sysctl.conf
 
 sample /etc/pf.conf and /etc/sysctl.conf for openbsd
+
+go to this link:-
+
+https://www.protectstar.com/en/blog/openbsd-77-as-a-robust-firewall-foundation-a-pfconf-and-sysctlconf-that-have-your-back
+
+https://www.protectstar.com/download/blog/pf.conf_noDMZ.txt
+
+https://www.protectstar.com/download/blog/pf.conf_withDMZ.txt
+
+https://www.protectstar.com/download/blog/sysctl.txt
+
+https://calomel.org/
