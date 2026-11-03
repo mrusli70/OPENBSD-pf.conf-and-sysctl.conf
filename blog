@@ -1,0 +1,163 @@
+OpenBSD 7.7 (7.8) as a Robust Firewall Foundation: a pf.conf and sysctl.conf That Have Your Back
+OpenBSD 7.7 (7.8) as a Robust Firewall Foundation: a pf.conf and sysctl.conf That Have Your Back
+October 08, 2025
+OpenBSD has long been known for its uncompromising security ethos: sane defaults, clean code, and “secure by default” as a mandate rather than a slogan. If you’re looking for a firewall that’s reliable and explainable in day‑to‑day use, OpenBSD gives you a solid base. At the same time, strong defaults are great, but a few targeted knobs raise the security level and predictability noticeably. Without turning your setup into a fragile science project.
+With this article, we want to provide a practical baseline that secures small networks, home labs, and many SMB environments with confidence—while remaining readable and maintainable.
+
+Instead of long checklists and arbitrary tuning tips, you’ll get well‑founded decisions with clear rationale. We’ll show you why a particular option is set, which risks it addresses, and what side effects to keep in mind. The goal isn’t to cover every theoretical attack scenario, but to give you a reliable starting point: lean rules, few exceptions, predictable behavior.
+
+This guide follows a clear line: explicitly allow; otherwise block. From outside to inside, only what the router itself needs is permitted; from inside to outside, only what you actually want is allowed. DNS is kept visible and controllable. DoH, DoT, DoQ, and QUIC get no quiet backchannels, so you don’t end up with “invisible” paths. States are intentionally bound to interfaces so connections stay where they originated. That makes the system predictable and troubleshooting tolerable. And because transparency beats ten clever tricks, all critical paths carry labels: in daily operations you can immediately see what’s used, what’s denied, and where to tighten.
+
+To keep things concrete, we provide two pf profiles you can choose from: a compact router‑only variant for classic LAN‑to‑internet scenarios, and a router+DMZ variant if you want to isolate services. We enforce client DNS strictly to 1.1.1.1 (optionally 1.0.0.1 as a fallback). That’s not pedantry—it’s a deliberate architectural choice: you regain visibility and control. If an application wants something else, it stands out, and you can make a conscious decision about whether and where to add an exception.
+
+The sysctl.conf complements this posture at the kernel level. OpenBSD already ships with a lot of goodness, but a few switches deliver a measurable gain in robustness: a hardened malloc configuration that makes classic memory bugs fail earlier and louder; disabling SMT/Hyper‑Threading when side‑channel risks bring you zero benefit; W^X that would rather terminate processes than let them run in dangerous gray areas; turning off redirects and nonessential tunneling protocols; modern TCP options and moderate rate limits that dampen network “noise” without breaking legitimate function. These aren’t flashy “tweaks”—they’re consistent hygiene: less attack surface, fewer surprises, more stable behavior under load.
+
+Out of scope are highly targeted attacks or full‑blown IDS/IPS deployments. If you want multi‑stage monitoring, deep protocol inspection, or threat‑intel feeds, this configuration doesn’t get in your way; it’s the foundation on which you can add those building blocks methodically later. We also intentionally don’t cover complex multi‑WAN policies, elaborate port‑forwarding landscapes, or exotic overlay networks here. All of that is doable, but not without diluting the baseline’s clarity.
+
+Our commitment to readability also means we prefer mechanics over magic. NAT is static where real‑time protocols benefit from it, and dynamic where it doesn’t matter. QUIC stays out so DNS can’t hide inside TLS streams. IPv6 is blocked initially to avoid “half‑open IPv6,” where clients prefer v6 while the firewall isn’t controlling it; later in the article you’ll get a clean recipe for turning IPv6 on properly if you need it. And wherever it helps, we mark edge cases with labels—not to colorize log files, but to get answers: Who tried to speak DoT? Which hosts hit the anti‑rebind rule? What triggers the egress blocks?
+
+Who is this for? For you if you treat administration as a craft and would rather spend an hour on a clean base than three weeks chasing odd side effects. For you if you want to understand your network instead of being surprised by default allowances. And for you if you feel “between the chairs”: not large enough for a SOC/blue‑team apparatus but too demanding for a commodity home router. The baseline presented here isn’t a magic trick—it’s a sensible standard: small enough to master, sturdy enough to keep.
+
+Threat Model: What We Defend Against—and What We Don’t
+This baseline is designed for environments without a dedicated blue team that still want reliable standards. It protects against the usual noise that hits your edge daily: broad scans, opportunistic exploits, protocol abuse like “DNS over everything,” misconfigurations, or permissive egress policies that make data exfiltration possible in the first place. It encapsulates optional servers in a DMZ, preventing lateral movement into the LAN. Not in scope are highly targeted attacks or full IDS/IPS stacks—you can add those later on top of this foundation.
+
+Design Principles: Small Attack Surface, Clear Responsibilities
+The configuration follows several guidelines that help with future adjustments:
+
+Fail‑closed. If something isn’t explicitly allowed, it stays closed—both inbound and outbound. You’ll quickly learn in testing what an application actually needs, and you keep control.
+Deterministic states. if-bound ensures a connection remains tied to the interface where it originated. On single‑WAN routers, that ends the hunt through magical “floating” states and makes troubleshooting easier.
+Egress minimalism. From inside to outside, only what’s truly necessary: classic web, mail submission, defined UDP ranges for VoIP/WebRTC—and DNS only to where you want it.
+Transparency over guessing. QUIC is blocked, as are DoH/DoT/DoQ. Yes, that’s inconvenient for some apps. In return you get clarity: DNS is DNS, TLS is TLS. If something needs shadow DNS, it stands out.
+Robust defaults. Scrubbing, MSS capping, randomized IDs, bogon filters, anti‑spoofing, TCP flag hygiene, and sensible rate limits for ICMP and RST. None of it is spectacular—together it’s solid hygiene.
+IPv6 by choice. IPv6 is off by default. If you want it, the article includes a clean enablement path. We avoid “half‑open IPv6” consistently (firewall doesn’t handle it, clients still prefer it).
+sysctl.conf — Kernel‑Level Security Levers That Actually Matter
+OpenBSD already brings strong defaults, but a few knobs noticeably raise security and predictability. Here are the essentials—no endless checklists, just clear reasoning.
+
+Memory hardening (vm.malloc_conf=CFGJRS). Guard pages, junk patterns, red zones, and canaries make classic memory bugs much harder to exploit and cause processes to fail loudly rather than silently corrupting. The small overhead is worth it in virtually all router scenarios.
+CPU/Hardware: SMT off, aperture closed. hw.smt=0 reduces side‑channel risks (Hyper‑Threading)—on routers the throughput hit is usually minimal. machdep.allowaperture=0 closes /dev/mem‑style shortcuts; perfect for headless routers. If you need X11/KMS, you’ll know—otherwise, keep it off.
+Routing & protocols: IPv4 on, IPv6 intentionally off. net.inet.ip.forwarding=1 turns your box into an IPv4 router. net.inet6.ip6.forwarding=0 prevents “accidental” IPv6 routing. We also disable unnecessary tunnels like IP‑in‑IP, GRE, ESP/AH, and EtherIP. Less crypto/encapsulation machinery means less attack surface and fewer surprises in production.
+Defusing legacy pitfalls. Directed broadcasts are off, redirects ignored—for both IPv4 and IPv6. ICMP redirects are a classic footgun; if you want to alter paths, do it explicitly in routing or PF, not via side channels.
+ICMP with restraint. No broadcast echo, no timestamps/netmask; error packets get a reasonable rate limit. That damps DDoS noise without breaking legitimate functionality. ICMP isn’t the enemy—but it needs guardrails.
+UDP/TCP hardening without hocus‑pocus. UDP checksums are mandatory; sensible socket buffers avoid ugly drops. For TCP, modern features like window scaling, timestamps, and SACK stay enabled—they improve stability. ECN is active; in modern networks it rarely hurts and helps under load. SYN cache/bucket limits and RST rate limiting absorb typical scan waves.
+Queues, BPF, and W^X. A longer if‑queue reduces drops during bursts. Larger BPF buffers are a gift to your future self when debugging. kern.wxabort=1 enforces W^X: code is either writable or executable, never both. Violations kill the process—fail‑closed, as desired. Swap encryption stays on so sensitive remnants never land in plaintext on disk.
+This sysctl selection is deliberately unspectacular. It shifts the curve from “usually works” to “behaves consistently under stress.” Just make sure you load it cleanly with sysctl -f, sanity‑check a few counters (sysctl -n net.inet6.icmp6.errppslimit, netstat -m, pfctl -s memory), and be mindful—if you tweak mbuf/cluster budgets, PF limits like set limit frags may need adjustments.
+
+pf.conf: Rules You Can Explain
+pf gives you endless possibilities. Our baseline takes exactly as much as you need for robust standards—no more, no less.
+
+Macros, tables, and labels—structure is half the battle. Start with clearly defined interfaces and networks: WAN, LAN, and—in the DMZ variant—DMZ. Add tables for bogons, abusers, scanners, and a watch list for suspicious DoH endpoints. These tables aren’t decoration: with persist they survive reloads, and via overload noisy sources land in them automatically. Consistent labels on rules give you operational visibility without heavy pcap work: pfctl -vvsr or systat pf shows you where the action is.
+Global options—predictable behavior. set block-policy drop and “aggressive” optimization are sensible conservative defaults. set state-policy if-bound ties connections to their ingress interface. We define limits for states, frags, and src‑nodes, set adaptive timeouts, and enable syncookies adaptively—they help when the tide is high. loginterface gives you WAN statistics; set skip on lo0 avoids self‑inflicted wounds.
+IPv6 is blocked in pf by default, matching sysctl and preventing “half‑open IPv6.” If you want IPv6, enable it deliberately and visibly.
+ICMP inbound: open enough to stay healthy. On the WAN interface we allow ICMP echo and “unreachable,” stateful and rate‑limited. That improves debuggability (how else do you reliably find MTU/path issues?) while shielding you from ping floods. Everything else—especially redirects—stays off.
+Scrubbing: less fragmentation, less frustration. We scrub in both directions: randomized IP IDs, a conservative minimum TTL, MSS capping at 1440 (in practice a healthy value), and TCP reassembly. That prevents fragmented/sketchy packets from clogging states and reduces PMTU headaches. With this, MSS tuning via sysctl is rarely needed.
+NAT: static where real time matters; dynamic where it doesn’t. UDP gets static ports—gold for VoIP/WebRTC, gaming, and many real‑time protocols. Everything else uses a high ephemeral range so egress attribution in packet captures stays sane and collisions are unlikely. NAT applies to everything except explicitly defined management destinations—no surprise paths.
+Anti‑spoofing, bogons, null ports. antispoof watches all relevant interfaces. Packets hitting the WAN with a broken source route get dropped early. We block bogons both inbound and outbound; traffic from, say, 10/8 or 127/8 to the internet usually means other problems. We also clean up null ports and implausible TCP flags—not rocket science, but it saves you pain with scanners and “creative” tools probing your address.
+Default deny: the big broom. After hygiene comes the hard cut: block all. From here on, everything is a conscious exception.
+Inbound on the WAN: only what the router itself needs. We allow inbound DHCP if your upstream requires it. That’s it. A public DMZ reachable from the internet is not the point of this baseline; you’d define port forwards for that—sparingly, please.
+QUIC: HTTP/3 stays out. We block UDP 80/443 on the WAN interface. That suffocates QUIC. Why so strict? Because QUIC is a convenient tunnel—even for DoH flavors and other “everything in one stream” tricks. If later you truly need HTTP/3 for specific targets (and know why), add narrow exceptions. The baseline prioritizes transparency over speed.
+Visibility for DoH/DoT/DoQ—with clear boundaries. DoT (853/TCP) and DoQ (784/UDP) are blocked on egress and logged on inbound. In LAN/DMZ we label TLS connections to known DoH hosts explicitly—without changing policy unless you choose the strict variant. The point: you see when clients attempt covert DNS.
+Admin access to the firewall: tight and throttled. SSH from LAN to the firewall is allowed with state, flag hygiene, and gentle rate limiting. Upstream management paths (e.g., a modem/router GUI) get targeted passes; small connection‑rate guards cushion misclicks and sprays. Labels keep these paths visible.
+DNS policy without a local resolver: enforce, don’t hope. The central point: clients in LAN (and DMZ, if present) may use only 1.1.1.1 and optionally 1.0.0.1 on port 53/TCP+UDP. Everything else to port 53 is blocked and logged. That’s not “nice to have”—it’s crucial for visibility. You’ll immediately see attempts to use other resolvers—or DoH/DoT/DoQ, which you block separately. You can swap in another external resolver any time; the mechanics stay the same.
+DMZ: no side doors, no shortcuts. In the DMZ variant there’s no intra‑DMZ communication, no return paths into the LAN, and only targeted egress passes for the services that live there (classic web, mail submission, VoIP/WebRTC UDP ranges). Access to any upstream GUI is off‑limits from the DMZ; that prevents a compromised server from touching your management network. Everything else is blocked—and logged—so you can quickly find the one missing screw.
+Mitigate outbound risk: close the classics. Outbound we block the usual suspects: SMB/NetBIOS, RPC/NFS, TFTP, SNMP, RDP/VNC/WinRM, and opportunistic SMTP. Each has its place inside your network or on deliberate paths; on the internet they don’t belong by default. If you need an exception, define it intentionally—with a label.
+The firewall itself: allowed out, but visible. The firewall may access the internet—with states, limits, and labels. You need that for updates, packages, and diagnostics. Don’t overdo it: this box is a router and watchdog, not a browsing terminal.
+Anti‑rebind, LAN→DMZ, and the grand clean‑up. Between LAN and DMZ, only explicitly defined paths are permitted (e.g., clients to a DMZ service); the return path stays closed. Anti‑rebind rules prevent clients from reaching protected internal targets via DNS tricks through the firewall. Everywhere else, PF says a clear “no”—with return where a quick error tone helps troubleshooting.
+Router‑Only vs. Router+DMZ: Which Profile Fits You?
+If you simply want to connect a LAN to the internet, router‑only is ideal—compact, clear, and still hardened. You get anti‑spoofing, bogon filters, a strict egress stance, DNS enforcement to 1.1.1.1/1.0.0.1, DoH/DoT/DoQ/QUIC controls, admin SSH from LAN to the firewall, and tidy defaults for scrubbing, states, and limits.
+
+As soon as you host services—even if they’re only internal—router+DMZ makes sense. A DMZ contains failures and reduces the chance that a compromised service becomes a springboard into your LAN. Intra‑DMZ stays closed; egress is whitelist‑based and tighter than LAN. DNS is equally strict; NTP stays closed until you truly need it.
+
+Enabling IPv6 Properly
+The baseline blocks IPv6 so nothing ends up half‑open. If you need IPv6, enable it deliberately and consistently: routing via sysctl, matching inet6 pf rules, a clean egress plan (yes, DNS enforcement here too—just for v6), and clear decisions on RA/DHCPv6. Mirror the good ideas from v4: anti‑spoofing, default deny, QUIC/DoH/DoQ management, and visible exceptions—no more, no less. The most important tip: don’t “sneak in” v6. If it’s present, do it right—or not yet.
+
+Operations, Diagnostics, and Forensics: Measure, Don’t Guess
+A strict policy is only good if you can read it in daily life. pf helps through three channels:
+
+Labels. Every relevant rule carries a descriptive label. In pfctl -vvsr, you see which paths are used, which are blocked, and where the action is. In practice that’s often enough to narrow down issues.
+
+Tables. With pfctl -t <table> -T show you read abuser/scanner entries. overload fills these tables automatically when clients open an unreasonable number of connections. That’s not punishment; it’s a seatbelt—slips don’t send you flying through the windshield.
+
+Minimal pcap. tcpdump is your friend—but use it purposefully. For DNS/DoH control, quick looks like
+tcpdump -n -e -ttt -i $wan 'port 53 or port 853 or (udp and port 784)'
+often suffice. That’s forensics with a plan, not “Wireshark until your eyes water.”
+
+A healthy test canon. When you change rules, compile them first without loading: pfctl -nf /etc/pf.conf. Then pfctl -f—and if something breaks, labels and tables guide fixes. For DNS enforcement, test actively: drill @1.1.1.1 openbsd.org should work; drill @9.9.9.9 openbsd.org should be blocked. For QUIC, verify that curl -I --http3 https://example.com doesn’t go over UDP; it should fall back to HTTP/2. Validate DoT/DoQ with intentional attempts to 1.1.1.1:853 and UDP 784—they should fail, and you should see the block counters on the labeled rules.
+
+A tip for egress changes. When you open something, mark it temporarily with a very explicit label and check after a week whether it’s actually used. If nothing uses it, remove it. That keeps your baseline lean.
+
+Performance Considerations Without Folklore
+This setup isn’t tuned to the razor’s edge—it’s tuned for stability. A few consequences matter:
+
+Blocking QUIC can slightly slow some sites. That’s a deliberate trade: visibility over speed. If you have valid reasons to allow HTTP/3, do it surgically (targets in a table, label them, done).
+
+ECN on is fine in most modern networks. If some exotic middlebox dislikes ECN, you’ll see it quickly and can disable ECN in that specific case—the baseline doesn’t fight you.
+
+Static UDP NAT ports are a gift to real‑time protocols. Anyone who has chased WebRTC issues knows how valuable that is. It costs nothing, except recognizing that NAT port “randomness” for UDP isn’t a security feature.
+
+If‑queues and BPF buffers are set pragmatically: enough headroom for bursts, and debug sessions that don’t die on 4 KB buffers. If you truly push line rate, measure and adjust—not the other way around.
+
+Common Pitfalls—and How to Handle Them Gracefully
+“My app only works with DoH!” Then it needs an exception—or, better, an honest evaluation. DoH isn’t inherently bad, but it’s counterproductive for network control at home or in businesses. You can allow specific hosts in a table; keep it a conscious exception, not a global opening.
+
+“Video calls stutter.” First verify that the UDP ranges for your provider are covered (Zoom/Teams/WebRTC). Static UDP ports help, but without the right egress corridor, nothing will improve. Adjust surgically, not broadly.
+
+“My mail client can’t send directly.” Correct—outbound port 25 is blocked. Mail should go via submission (465/587) to your provider or server, not directly to the internet. If needed, define those submission ports as allowed egress—clearly labeled.
+
+“IPv6 suddenly broke.” In this baseline, v6 is blocked. If clients prefer v6 while the firewall doesn’t route it, you’ll see timeouts. Either enable v6 properly (with rules) or make it clear to clients (RA/ND) that v6 isn’t available yet.
+
+“Weird effects after a rule change.” Think states. Old states survive by default. When you change core policy (e.g., open a new egress port), kill the affected states (pfctl -k ...) or, if needed, flush them all (pfctl -F state). After that, the world is consistent again.
+
+Why This Baseline Is “Secure”—and What Security Means Here
+Security is never absolute. But it is measurable when you set clear goals and verify your path honestly. This baseline reduces attack surface because it:
+
+minimizes every inbound exposure,
+makes egress the exception rather than the rule,
+enforces and keeps DNS visible,
+blocks obfuscated paths (QUIC/DoH/DoT/DoQ) consistently,
+disables pseudo‑features (redirects, broadcasts),
+applies robust TCP/ICMP defaults,
+makes state handling deterministic,
+and gives you tools to observe usage in daily operations.
+
+At the same time, the configuration remains maintainable. It isn’t “secure” because it has 3,000 lines; it’s secure because you can explain every line.
+
+Migration: How to Proceed
+If you’re coming from an existing pf configuration, move step by step:
+
+sysctl first. Load the hardening that doesn’t break service availability. Check logs for unusual ICMP or RST noise.
+
+Test pf policy alongside. Use pfctl -nf and a lab or maintenance window. On first enable, mind SSH from LAN to the firewall—locking yourself out is no fun.
+
+Tighten egress. Turn on DNS enforcement and observe. Then progressively close the classic risk services. One to two weeks of monitoring helps find blind spots.
+
+Introduce a DMZ (if needed). Move services, keep intra‑DMZ and DMZ→LAN closed. Open only the truly necessary egress paths. Observe and refine.
+
+Decide on IPv6 deliberately. Either enable it properly—or leave it off and keep clients informed.
+
+Each stage raises security without a risky big bang.
+
+What You Can Easily Extend Later
+This baseline is a foundation, not a cage. Typical extensions:
+
+Targeted exceptions for QUIC/DoH if you have validated reasons—always via tables and labels.
+Site‑to‑site VPNs with minimal attack surface; the sysctl defaults don’t restrict you as long as you explicitly allow the protocols.
+Monitoring/alerting. pf counters and systat pf are great for basic metrics. For more, ship pf logs to a central system.
+IPv6, fully mirrored to the v4 logic—not as a bolt‑on.
+A Word on Upgrades and Maintenance
+OpenBSD keeps its promises—but read release notes during upgrades, especially around pf syntax and kernel defaults. Labels, tables, and clear macros make it quick to validate your config between versions. Maintain the discipline to comment every exception: why it exists, who needs it, when you last reviewed it. Exceptions aren’t a sin—uncommented exceptions are technical debt.
+
+Conclusion: Clarity Is the Best Hardening
+This baseline has a simple goal: clarity over complexity. You get an OpenBSD firewall that’s predictable in daily use, keeps attack surface small, and shows you—through labels, tables, and sensible defaults—what’s actually happening. We favor explicit choices over implicit side effects: strict egress policy, DNS enforcement to defined resolvers, no quiet side channels over QUIC or DoH/DoT/DoQ, deterministic states, and robust kernel switches. The result isn’t an academic showpiece but a durable starting point you can build on with confidence.
+
+It’s important to note that this baseline intentionally assumes no local resolver and no local NTP service. It targets setups that should become stable quickly without additional infrastructure. If you later want more on‑prem control, you can add it seamlessly—the architecture is ready, without abandoning the core stance.
+
+To save you hunting around: You’ll find the complete configuration proposals below—both pf.conf profiles (router‑only without DMZ and router+DMZ with strict isolation) as well as the hardened sysctl.conf. This article explains the decisions; the files below implement them 1:1. If you stick to the sequence “validate → load → measure”, you’ll reach a reproducible result quickly.
+
+Equally important is being honest about scope: Not in focus here are highly targeted attacks or full IDS/IPS scenarios. That doesn’t mean you must forgo them—quite the opposite. This foundation is laid so you can add those components methodically. Three extension paths have proven useful in practice.
+
+If you have ideas on tightening specific rules, special requirements, or observations from your own operations you’d like to share: please get in touch. Real‑world feedback is the best catalyst for meaningful improvements—and it will feed into future enhancements. Security is a process, not a sprint; with a clear baseline and a community that shares experience, “good” turns into “great” quickly.
+
+Download sysctl.conf: https://www.protectstar.com/download/blog/sysctl.txt
+Download pf.conf (with DMZ): https://www.protectstar.com/download/blog/pf.conf_withDMZ.txt
+Download pf.conf (no DMZ): https://www.protectstar.com/download/blog/pf.conf_noDMZ.txt
+
